@@ -1,0 +1,228 @@
+================================================================
+  beSSVEP / bPRCA / FusionCA — 运行步骤
+  论文: Liu et al. (2026) IEEE JBHI
+  "A Novel Binocular-Encoded SSVEP Framework for Efficient
+   VR-Based Brain-Computer Interface"
+================================================================
+
+目录结构:
+---------
+TRCA-SSVEP-master/
+  src/
+    prca.m              - PRCA 空间滤波器 (按周期分段)
+    ftrca.m             - 快速 TRCA
+    trca.m              - 原始 TRCA
+    filterbank.m        - 滤波器组 (Chebyshev/FFT fallback)
+    train_fusionca.m    - FusionCA 训练 (bPRCA + FTRCA)
+    test_fusionca.m     - FusionCA 分类
+    generate_beSSVEP_encoding.m - 双目编码矩阵生成
+    itr.m               - ITR 计算
+    test_fbcca.m        - FBCCA 方法 (对比用)
+    train_model.m       - TRCA 训练 (对比用)
+    test_model.m        - TRCA 分类 (对比用)
+  tutorial/
+    tutorial_fusionca.m - FusionCA 教程 (主要运行入口)
+    tutorial_fempmatch.m - TRCA 教程 (对比用)
+    tutorial_fbcca.m    - FBCCA 教程 (对比用)
+  data/
+    sample.mat          - 示例数据 (40目标, 单目, 250Hz)
+
+================================================================
+一、使用真实双目 SSVEP 数据运行
+================================================================
+
+步骤 1: 准备数据
+---------------
+你的 .mat 数据文件应包含变量 "eeg"，维度为:
+  eeg: (num_targs, num_channels, num_samples, num_blocks)
+
+  例如论文设置: (16, 9, 4000, 6)
+  - 16 个目标 (4x4 beSSVEP 界面)
+  - 9 个通道 (Pz, POz, PO3, PO4, PO5, PO6, Oz, O1, O2)
+  - 4000 样本 (4秒 @ 1000Hz) 或更短的数据段
+  - 6 个 block (每个 block 包含所有 16 个目标的 trial)
+
+步骤 2: 配置参数
+---------------
+打开 tutorial/tutorial_fusionca.m, 修改以下参数:
+
+  use_paper_data = true;           % 使用真实数据
+  filename = '您的数据文件路径.mat';  % 数据文件路径
+  fs = 1000;                       % 采样率 (论文用 1000 Hz)
+  base_freqs = [11, 12, 13];       % 基频 (F1, F2, F3)
+  len_gaze_s = 0.4;                % 数据长度 (论文最优 0.4s)
+  len_delay_s = 0.13;              % 视觉延迟 130ms
+  num_fbs = 5;                     % 滤波器组子带数
+  is_ensemble = 1;                 % 集成模式
+
+步骤 3: 运行
+-----------
+在 MATLAB 中执行:
+  cd('tutorial');
+  tutorial_fusionca;
+
+  或者命令行:
+  matlab -batch "cd('tutorial'); tutorial_fusionca; exit;"
+
+步骤 4: 解读输出
+---------------
+输出示例:
+  Block 1: Acc = 71.39%, ITR = 138.50 bpm
+  Block 2: Acc = 72.50%, ITR = 143.20 bpm
+  ...
+  Mean accuracy = 71.39% (95% CI: 65.2-77.6%)
+  Mean ITR = 138.50 bpm (95% CI: 120.3-156.7 bpm)
+
+  这对应论文中的 6-fold 留一法交叉验证结果。
+  ITR 计算公式包含 0.5s 的注视转移时间。
+
+================================================================
+二、4x4 beSSVEP 编码方案
+================================================================
+
+论文使用 3 个基频 (11, 12, 13 Hz) 编码 16 个目标:
+  (3+1)^2 = 16, 其中 "+1" 是 void (无刺激)
+
+编码矩阵 (target = [f_left, f_right]):
+  Target  1: (0,  0)    Target  9: (12, 0)
+  Target  2: (0,  11)   Target 10: (12, 11)
+  Target  3: (0,  12)   Target 11: (12, 12)
+  Target  4: (0,  13)   Target 12: (12, 13)
+  Target  5: (11, 0)    Target 13: (13, 0)
+  Target  6: (11, 11)   Target 14: (13, 11)
+  Target  7: (11, 12)   Target 15: (13, 12)
+  Target  8: (11, 13)   Target 16: (13, 13)
+
+编码矩阵通过 generate_beSSVEP_encoding.m 自动生成:
+  encoding_matrix = generate_beSSVEP_encoding([11, 12, 13]);
+
+================================================================
+三、Unity 4x4 刺激界面设置
+================================================================
+
+论文使用 Unity3D + PICO Neo3 Pro VR 头显。
+
+Unity 场景结构:
+---------------
+  - Default Layer:    默认背景层 (双眼可见)
+  - Left Eye Layer:   仅左眼可见 (camera.cullingMask)
+  - Right Eye Layer:  仅右眼可见
+  - Floor Layer:      地面参考层 (双眼可见)
+
+Camera 设置:
+-----------
+  - 两个 Camera (分别对应左眼/右眼)
+  - 左眼 Camera: cullingMask 包含 Left Eye Layer
+  - 右眼 Camera: cullingMask 包含 Right Eye Layer
+  - 双 Camera 均包含 Default Layer 和 Floor Layer
+
+刺激生成:
+---------
+  使用正弦亮度调制:
+    luminance(t) = 0.5 + 0.5 * sin(2*pi*f*t)
+
+  关键代码片段 (C#):
+    float t = Time.time;
+    float luminance = 0.5f + 0.5f * Mathf.Sin(2f * Mathf.PI * frequency * t);
+    material.color = new Color(luminance, luminance, luminance, 1f);
+
+  每个目标的 GameObject 包含两个子对象:
+    - LeftStimulus  (在 Left Eye Layer, 以 f_left 频率闪烁)
+    - RightStimulus (在 Right Eye Layer, 以 f_right 频率闪烁)
+
+4x4 网格布局:
+-------------
+  在 VR 空间中创建 4x4 的刺激方块网格
+  每个方块的 (左眼频率, 右眼频率) 按编码矩阵分配
+
+  布局注意事项 (来自论文):
+  - 相邻目标不应共用相同的频率分量
+  - 例如: 目标1 (11,0) 和目标2 (0,11) 可以相邻
+  - 但目标1 (11,0) 和目标5 (11,11) 不应相邻 (共用 11Hz)
+
+事件标记同步:
+-------------
+  Unity 通过并口 (parallel port) 发送事件标记到 EEG 采集系统
+  - 刺激开始时发送触发码 (1-16 对应 16 个目标)
+  - 确保标记与视觉刺激同步
+
+================================================================
+四、数据格式要求
+================================================================
+
+如果你的数据不是 MATLAB .mat 格式:
+  - 使用 EEGLAB 导入 (.set, .edf, .bdf 等格式)
+  - 导出为 .mat 文件, 变量名为 "eeg"
+  - 维度: (targets, channels, time_points, blocks)
+
+预处理步骤 (论文中的做法):
+  1. 陷波滤波: 48-52 Hz 和 98-102 Hz (去除工频干扰)
+  2. 带通滤波: 4-100 Hz (EEGLAB basic FIR filter)
+  3. 分段: 相对于刺激起始 [0.13, 0.13+数据长度] 秒
+     (130ms 是视觉延迟)
+
+如果采样率不是 1000 Hz:
+  - 代码会自动根据 fs 参数计算周期长度
+  - 但 Chebyshev 滤波器设计需要根据 fs 调整
+  - filterbank.m 中的通带频率是 [8*b-2, 90] Hz (按论文)
+
+================================================================
+五、对比实验 (TRCA baseline)
+================================================================
+
+要对比 FusionCA 和传统 TRCA 的性能:
+
+  % 运行 TRCA baseline
+  cd('tutorial');
+  tutorial_tempmatch;    % 使用 train_model/test_model
+
+  % 运行 FusionCA
+  tutorial_fusionca;     % 使用 train_fusionca/test_fusionca
+
+  预期: FusionCA > TRCA (尤其在短数据窗口 0.2-1.0s)
+
+================================================================
+六、算法核心公式 (来自论文)
+================================================================
+
+bPRCA (Equation 2-10):
+  - 对每个目标 i 和每个频率 f in F:
+    1. Lf = round(Fs/f)
+    2. 切分为周期段 X~(i,f) ∈ R^(Nc × Lf × (Nr×Pf))
+    3. 解广义特征值问题: W(i,f) = argmax (W^T S~ W) / (W^T Q~ W)
+    4. PRC 模板: T(i,f) = mean(所有周期段)
+    5. 完整模板: T̂(i,f) = 重复 T(i,f) Ns/Lf 次
+  - R_bPRCA(i) = sum_{f in F} R_f(i)    [Equation 9]
+    其中 R_f(i) = corr(W^T·Y, W^T·T̂)    [Equation 8]
+
+FusionCA (Equation 12):
+  - Score(i) = sum_{f in F} R_f(i) + R_FTRCA(i)
+  - FTRCA = TRCA 作为 PRCA 特例 (L_FTRCA = Ns)
+
+滤波器组权重 (Equation 11):
+  - w_b = b^(-1.25) + 0.25, b = 1,2,...,B
+
+================================================================
+七、常见问题
+================================================================
+
+Q: 运行时提示 "cheb1ord" 未找到?
+A: filterbank.m 现在支持 FFT 频域滤波回退方案,
+   无需 Signal Processing Toolbox 也可运行。
+
+Q: 运行太慢?
+A: bPRCA 对每个目标×每个频率都做 PRCA, 计算量较大。
+   - 减少 num_fbs (如改为 3)
+   - 减少 base_freqs 数量
+   - 使用较短的 len_gaze_s
+
+Q: 准确率低于论文报告?
+A: 可能原因:
+   - 数据质量差异 (VR 设备同步精度)
+   - 电极位置/数量不同
+   - 预处理参数不同
+   - 受试者个体差异
+
+Q: 如何用现有 sample.mat 验证代码?
+A: 设置 use_paper_data = false 即可自动使用 sample.mat
+   (单目数据 + 人工编码, 仅用于验证代码正确性)
